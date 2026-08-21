@@ -1,0 +1,63 @@
+================================================================================
+                    KITTY & TMUX-STYLE KEYBINDINGS CHEAT SHEET
+================================================================================
+
+  Prefix Paradigm:
+    • Outer Terminal (Kitty):        Ctrl + p   (Prefix key, release then press key)
+    • Inner Multiplexer (Tmux/Zellij): Ctrl + b   (Isolated from outer Kitty)
+
+--------------------------------------------------------------------------------
+ 1. SPLITS & PANES  (Press Ctrl+p, release, then press key)
+--------------------------------------------------------------------------------
+  Ctrl+p %               Split pane Vertically   (Left / Right)
+  Ctrl+p "               Split pane Horizontally (Top / Bottom)
+  Ctrl+p o               Focus Next pane (cycle through panes)
+  Ctrl+p <Arrow>         Focus Neighboring pane (Left / Right / Up / Down)
+  Ctrl+p z               Toggle Zoom / Maximize active pane
+  Ctrl+p x               Close active pane (with safety confirmation)
+  Ctrl+p !               Break / Detach active pane into a new Tab
+  Ctrl+p {               Swap active pane with Previous pane
+  Ctrl+p }               Swap active pane with Next pane
+  Ctrl+Shift+<Arrow>     Resize active pane (Wider / Narrower / Taller / Shorter)
+
+--------------------------------------------------------------------------------
+ 2. TABS MANAGEMENT  (Press Ctrl+p, release, then press key)
+--------------------------------------------------------------------------------
+  Ctrl+p c               Create New Tab
+  Ctrl+p 1 .. 9          Direct Jump to Tab 1 ~ 9 (Numbers always visible on top)
+  Ctrl+p n               Next Tab
+  Ctrl+p p               Previous Tab
+  Ctrl+p &               Close current Tab
+  Ctrl+p ,               Rename current Tab title
+
+  * Top Tab Bar features:
+    • 100% Full-Width equal-distribution (zero wasted black margins)
+    • Vivid Orange-Red highlight for SSH tabs with [SSH:IP/Host] label
+    • Permanent tab numbers in front (e.g. "1: zsh", "2: [SSH:192.168.1.50] debian")
+
+--------------------------------------------------------------------------------
+ 3. KITTENS & EXTENSIONS  (Press Ctrl+p, release, then press key)
+--------------------------------------------------------------------------------
+  Ctrl+p s               Search scrollback history with Regex (Search Kitten)
+  Ctrl+p u               Find and open URLs on screen in browser (Hints Kitten)
+  Ctrl+p f               Find and open file paths on screen in Neovim (Hints Kitten)
+  Ctrl+p y               Copy a line from screen to clipboard (Hints Kitten)
+  Ctrl+p j               Jump to Next scroll mark
+  Ctrl+p k               Jump to Previous scroll mark
+  Ctrl+Shift+v           Smart Paste (Pasting images saves file and pastes path)
+
+--------------------------------------------------------------------------------
+ 4. GENERAL & SYSTEM CONTROLS
+--------------------------------------------------------------------------------
+  Ctrl+p r               Reload Kitty configuration + Show macOS system notification
+  Ctrl+p ?               Open this interactive Keybindings Cheat Sheet
+  Option+p               Quick switch AI model (in omp / Open-Model-Prompt)
+  F11                    Toggle Fullscreen mode
+  Ctrl+Shift+m           Toggle Maximized window
+  Ctrl+Shift+i           Minimize window
+  Ctrl+c                 Copy selected text / Send copy to clipboard
+  Ctrl+Shift+c           Send raw SIGINT (Ctrl+C signal) when needed
+
+================================================================================
+                  Press [q] or [Esc] to exit this cheat sheet
+================================================================================

@@ -1,0 +1,4 @@
+*.pyc
+__pycache__/
+last_session.kitty
+.DS_Store

@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+# kitty-smart-paste — portable image→path smart paste for kitty.
+#
+# Self-contained: NO sumika-shell dependency. Works on Linux (Wayland/X11)
+# and macOS. Drop this one file on any machine with kitty, add one line to
+# kitty.conf, and Ctrl+Shift+V smart-pastes.
+#
+# ── Setup ──────────────────────────────────────────────────────────────
+#
+#   1. Copy this script to your machine, chmod +x:
+#        cp kitty-smart-paste ~/bin/kitty-smart-paste
+#        chmod +x ~/bin/kitty-smart-paste
+#
+#   2. Install platform clipboard tools:
+#        macOS:   brew install pngpaste jq
+#        Linux:   wl-clipboard (Wayland) or xclip (X11), jq  — usually already installed
+#
+#   3. Add to kitty.conf (requires remote control):
+#        listen_on unix:/tmp/mykitty-{kitty_pid}
+#        map ctrl+v launch --type=background /path/to/kitty-smart-paste
+#
+#   4. Restart kitty. Ctrl+V now:
+#        - Image on clipboard → saves to /tmp, types the PATH into the terminal
+#        - Text on clipboard  → types it (bracketed paste)
+#
+#   Debug: run with --probe to see detected platform, socket, clipboard, SSH.
+#
+# ── Dependencies ───────────────────────────────────────────────────────
+#
+#   Required (both platforms): kitty with remote-control, jq, ssh, file
+#   Linux Wayland:  wl-paste, wl-copy  (wl-clipboard)
+#   Linux X11:      xclip
+#   macOS:          pngpaste, pbpaste, pbcopy  (pb* are built-in)
+#
+# ── Why not kitten clipboard? ──────────────────────────────────────────
+#
+#   kitten clipboard uses OSC 5522 via /dev/tty. In --type=background
+#   (the launch mode for key bindings) there is no controlling terminal,
+#   so kitten clipboard fails with "open /dev/tty: No such device". This
+#   script uses platform-native clipboard tools instead, which work in
+#   background mode because they talk to the display server directly.
+
+set -eu
+
+# ── platform ────────────────────────────────────────────────────────────
+OS="$(uname -s)"
+case "$OS" in
+    Linux)  PLATFORM=linux  ;;
+    Darwin) PLATFORM=macos  ;;
+    *)      PLATFORM=linux  ;;
+esac
+
+# macOS: kitty launched from Finder/Spotlight inherits a minimal GUI PATH that
+# omits homebrew, so pngpaste (and jq if brew-installed) aren't found. Prepend
+# the standard homebrew bin dirs (Apple Silicon + Intel) so deps resolve.
+case "$PLATFORM" in
+    macos) PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" ;;
+esac
+
+KITTY_BIN=kitty
+[ -x /Applications/kitty.app/Contents/MacOS/kitty ] && KITTY_BIN=/Applications/kitty.app/Contents/MacOS/kitty
+
+
+# ── utilities ───────────────────────────────────────────────────────────
+LOG=/tmp/kitty-smart-paste.log
+log() { echo "$(date '+%H:%M:%S') $*" >> "$LOG" 2>/dev/null || true; }
+
+now_ms() {
+    # Milliseconds since epoch. GNU date %3N is unavailable on BSD/macOS
+    # (date +%s%3N yields "...N"), which used to degrade this to 1-second
+    # resolution and made the dedupe/guard windows racy across second
+    # boundaries (double pastes). perl Time::HiRes is core on macOS & Linux.
+    local v
+    v="$(perl -MTime::HiRes -e 'printf("%d", Time::HiRes::time()*1000)' 2>/dev/null || true)"
+    case "$v" in ''|*[!0-9]*)
+        v="$(date +%s%3N 2>/dev/null || true)"
+        case "$v" in *N*|"") printf '%s000' "$(date +%s)"; return ;; *) printf '%s' "$v"; return ;; esac
+    esac
+    printf '%s' "$v"
+}
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        cksum "$1" | awk '{print $1":"$2}'
+    fi
+}
+
+
+# ── socket resolution ───────────────────────────────────────────────────
+socket_alive() {
+    [ -n "$1" ] || return 1
+    "$KITTY_BIN" @ --to "$1" ls >/dev/null 2>&1
+}
+
+resolve_socket() {
+    # Prefer the launching instance, but only if it still answers.
+    # Stale unix sockets remain as files after kitty exits; [ -S ] is not enough.
+    local cand path best="" best_m=0 m
+    if [ -n "${KITTY_LISTEN_ON:-}" ]; then
+        case "$KITTY_LISTEN_ON" in
+            unix:*)
+                if [ -S "${KITTY_LISTEN_ON#unix:}" ] && socket_alive "$KITTY_LISTEN_ON"; then
+                    echo "$KITTY_LISTEN_ON"
+                    return
+                fi
+                ;;
+            *)
+                if socket_alive "$KITTY_LISTEN_ON"; then
+                    echo "$KITTY_LISTEN_ON"
+                    return
+                fi
+                ;;
+        esac
+    fi
+    for cand in /tmp/mykitty-* /tmp/mykitty /tmp/kitty-* "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kitty-"*; do
+        [ -S "$cand" ] || continue
+        socket_alive "unix:$cand" || continue
+        m=$(stat -f %m "$cand" 2>/dev/null || stat -c %Y "$cand" 2>/dev/null || echo 0)
+        if [ "$m" -ge "$best_m" ]; then
+            best="$cand"
+            best_m=$m
+        fi
+    done
+    [ -n "$best" ] && echo "unix:$best"
+}
+KC="$(resolve_socket)"
+log "socket=${KC:-<none>} platform=$PLATFORM win=${KITTY_WINDOW_ID:-<unset>}"
+
+
+# ── clipboard read / write ──────────────────────────────────────────────
+read_clipboard_image() {
+    local out="$1"
+    case "$PLATFORM" in
+        macos)
+            command -v pngpaste >/dev/null 2>&1 || return 1
+            pngpaste "$out" 2>/dev/null || return 1
+            ;;
+        linux)
+            if command -v wl-paste >/dev/null 2>&1; then
+                local mime fmt
+                mime=$(wl-paste -l 2>/dev/null | grep -m1 '^image/' || true)
+                [ -n "$mime" ] || return 1
+                fmt=${mime#image/}
+                case "$fmt" in png|jpeg|webp|gif|bmp|tiff|svg+xml) ;; *) fmt=png ;; esac
+                wl-paste -t "image/$fmt" > "$out" 2>/dev/null || wl-paste -t image/png > "$out" 2>/dev/null || return 1
+            elif command -v xclip >/dev/null 2>&1; then
+                xclip -selection clipboard -t image/png -o > "$out" 2>/dev/null || return 1
+            else
+                return 1
+            fi
+            ;;
+    esac
+    [ -s "$out" ] || return 1
+    file -b "$out" 2>/dev/null | grep -qi image || return 1
+}
+
+read_clipboard_text() {
+    local out="$1"
+    case "$PLATFORM" in
+        macos) pbpaste > "$out" 2>/dev/null ;;
+        linux)
+            if command -v wl-paste >/dev/null 2>&1; then
+                wl-paste 2>/dev/null > "$out"
+            elif command -v xclip >/dev/null 2>&1; then
+                xclip -selection clipboard -o > "$out" 2>/dev/null
+            fi
+            ;;
+    esac
+}
+
+write_clipboard_text() {
+    local in="$1"
+    case "$PLATFORM" in
+        macos) pbcopy < "$in" 2>/dev/null ;;
+        linux)
+            if command -v wl-copy >/dev/null 2>&1; then
+                wl-copy < "$in" 2>/dev/null
+            elif command -v xclip >/dev/null 2>&1; then
+                xclip -selection clipboard -i < "$in" 2>/dev/null
+            fi
+            ;;
+    esac
+}
+
+# ── process inspection (platform-branched) ──────────────────────────────
+proc_comm() {
+    case "$PLATFORM" in
+        macos) ps -o comm= -p "$1" 2>/dev/null | sed 's|.*/||' | tr -d '[:space:]' ;;
+        linux) tr -d '[:space:]' < "/proc/$1/comm" 2>/dev/null ;;
+    esac
+}
+
+proc_argv() {
+    case "$PLATFORM" in
+        macos) ps -ww -o args= -p "$1" 2>/dev/null ;;
+        linux) tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null ;;
+    esac
+}
+
+proc_exists() {
+    case "$PLATFORM" in
+        macos) ps -p "$1" >/dev/null 2>&1 ;;
+        linux) [ -d "/proc/$1" ] ;;
+    esac
+}
+
+# BFS over a process subtree. Bounded (24 levels, 500 pids).
+tree_pids() {
+    local IFS=$' \n\t'
+    local current="$1" next pid kids depth=0 total=1
+    printf '%s\n' "$current"
+    while [ "$depth" -lt 24 ]; do
+        next=""
+        for pid in $current; do
+            case "$PLATFORM" in
+                macos) kids=$(pgrep -P "$pid" 2>/dev/null || true) ;;
+                linux) kids=$(cat "/proc/$pid/task/*/children" 2>/dev/null | tr '\n' ' ') ;;
+            esac
+            kids=${kids%${kids##*[! ]}}
+            [ -n "$kids" ] || continue
+            printf '%s\n' $kids
+            next="$next $kids"
+            total=$((total + $(printf '%s' $kids | wc -w)))
+        done
+        [ -n "${next// }" ] || break
+        [ "$total" -le 500 ] || break
+        current="${next# }"
+        depth=$((depth + 1))
+    done
+}
+
+# ── tmux traversal (cross-platform tmux commands) ───────────────────────
+TMUX_DEPTH=0
+
+ssh_via_tmux_client() {
+    local IFS=$' \n\t'
+    local client="$1" dir sock cpid csess sess pane_pids pid found rc=1
+    command -v tmux >/dev/null 2>&1 || return 1
+    dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+    for sock in "$dir"/*; do
+        [ -S "$sock" ] || continue
+        sess=""
+        while IFS=' ' read -r cpid csess; do
+            [ "$cpid" = "$client" ] && { sess="$csess"; break; }
+        done < <(tmux -S "$sock" list-clients -F '#{client_pid} #{session_id}' 2>/dev/null)
+        [ -n "$sess" ] || continue
+        pane_pids=$(tmux -S "$sock" list-panes -a -F '#{session_id} #{window_active} #{pane_active} #{pane_pid}' 2>/dev/null \
+            | awk -v s="$sess" '$1 == s && $2 == "1" && $3 == "1" {print $4}')
+        TMUX_DEPTH=$((TMUX_DEPTH + 1))
+        if [ "$TMUX_DEPTH" -le 4 ]; then
+            for pid in $pane_pids; do
+                found=$(resolve_ssh_under "$pid") && { printf '%s' "$found"; rc=0; break; }
+            done
+        fi
+        TMUX_DEPTH=$((TMUX_DEPTH - 1))
+        [ "$rc" = 0 ] && return 0
+    done
+    return 1
+}
+
+resolve_ssh_under() {
+    local IFS=$' \n\t'
+    local root="$1" list pid found
+    list=$(tree_pids "$root" | tr '\n' ' ')
+    for pid in $list; do
+        [ "$(proc_comm "$pid")" = ssh ] && { printf '%s' "$pid"; return 0; }
+    done
+    for pid in $list; do
+        case "$(proc_comm "$pid")" in
+            tmux|tmux:*) found=$(ssh_via_tmux_client "$pid") && { printf '%s' "$found"; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
+# ── SSH command line parsing ────────────────────────────────────────────
+SSH_DEST=""
+SSH_OPTS=()
+parse_ssh_cmdline() {
+    local pid="$1" argv=() i=1 n a opt rest
+    if [ "$PLATFORM" = "macos" ]; then
+        # macOS: ps gives one space-separated line; word-split it.
+        IFS=' ' read -ra argv <<< "$(proc_argv "$pid")"
+    else
+        # Linux: /proc/cmdline gives null→newline separated, one arg per line.
+        while IFS= read -r line; do
+            argv+=("$line")
+        done < <(proc_argv "$pid")
+    fi
+    n=${#argv[@]}
+    [ "$n" -ge 2 ] || return 1
+    while [ "$i" -lt "$n" ]; do
+        a=${argv[$i]}
+        case "$a" in
+            --) i=$((i + 1)); [ "$i" -lt "$n" ] && SSH_DEST=${argv[$i]}; break ;;
+            -p|-l|-i|-F|-J|-o) i=$((i + 1)); [ "$i" -lt "$n" ] || return 1; SSH_OPTS+=("$a" "${argv[$i]}") ;;
+            -[pliFJo]?*) opt=${a:0:2}; rest=${a:2}; SSH_OPTS+=("$opt" "$rest") ;;
+            -[bcDeEILmOQRSWw]) i=$((i + 1)) ;;
+            -4|-6) SSH_OPTS+=("$a") ;;
+            -*) ;;
+            *) SSH_DEST="$a"; break ;;
+        esac
+        i=$((i + 1))
+    done
+    [ -n "$SSH_DEST" ] || return 1
+    case "$SSH_DEST" in -*) return 1 ;; esac
+    return 0
+}
+
+# ── kitty remote control: focused shell pid + window id ─────────────────
+kitty_focused_shell_pid() {
+    [ -n "$KC" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    local ls_out pid
+    ls_out=$("$KITTY_BIN" @ --to "$KC" ls 2>/dev/null) || return 1
+    pid=$(printf '%s' "$ls_out" | jq -r '
+        . as $root
+        | ((map(select(.is_focused)) | .[0]) // null) as $osw
+        | (if $osw == null and ($root | length) == 1 then $root[0] else $osw end) as $w
+        | if $w == null then empty
+          else (($w.tabs | map(select(.is_active)) | .[0]) // $w.tabs[0]) as $tab
+          | (($tab.windows | map(select(.is_focused)) | .[0]) // $tab.windows[0] | .pid // empty)
+          end' 2>/dev/null)
+    [ -n "$pid" ] && { printf '%s' "$pid"; return 0; }
+    return 1
+}
+
+kitty_focused_window_id() {
+    # Background launch inherits the source window id. Trust it first so we
+    # never depend on is_focused (can be false while @ ls runs off-thread).
+    case "${KITTY_WINDOW_ID:-}" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s' "$KITTY_WINDOW_ID"; return 0 ;;
+    esac
+    [ -n "$KC" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    local ls_out win_id
+    ls_out=$("$KITTY_BIN" @ --to "$KC" ls 2>/dev/null) || return 1
+    win_id=$(printf '%s' "$ls_out" | jq -r '
+        . as $root
+        | ((map(select(.is_focused)) | .[0]) // null) as $osw
+        | (if $osw == null and ($root | length) == 1 then $root[0] else $osw end) as $w
+        | if $w == null then empty
+          else (($w.tabs | map(select(.is_active)) | .[0]) // $w.tabs[0]) as $tab
+          | (($tab.windows | map(select(.is_focused)) | .[0]) // $tab.windows[0] | .id // empty)
+          end' 2>/dev/null)
+    [ -n "$win_id" ] && { printf '%s' "$win_id"; return 0; }
+    return 1
+}
+
+# Image paths go through send-text. Plain text uses kitty's own paste action
+# so the TUI does not see both send-text AND the still-full clipboard.
+paste_payload() {
+    local payload="$1" win_id space_file rc
+    win_id=$(kitty_focused_window_id) || { log "no kitty window id"; return 1; }
+    log "send-text win=$win_id mode=image"
+
+    space_file=$(mktemp /tmp/ksp-space.XXXXXX)
+    printf ' ' > "$space_file"
+    write_clipboard_text "$space_file"
+    rm -f "$space_file"
+
+    rc=0
+    "$KITTY_BIN" @ --to "$KC" send-text --match "id:$win_id" \
+        --from-file "$payload" --bracketed-paste auto >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || log "send-text failed rc=$rc"
+    return "$rc"
+}
+
+paste_native_text() {
+    local win_id rc
+    win_id=$(kitty_focused_window_id) || { log "no kitty window id"; return 1; }
+    log "native paste win=$win_id"
+    rc=0
+    "$KITTY_BIN" @ --to "$KC" action --match "id:$win_id" paste_from_clipboard >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || log "native paste failed rc=$rc"
+    return "$rc"
+}
+
+
+
+
+# ── anti-double-paste ───────────────────────────────────────────────────
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/kitty-smart-paste"
+mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
+LOCK_DIR=""
+
+release_run_lock() {
+    [ -n "${LOCK_DIR:-}" ] && rm -rf "$LOCK_DIR"
+    LOCK_DIR=""
+}
+
+acquire_run_lock() {
+    # macOS has no flock. mkdir is atomic. Covers key-repeat and
+    # ctrl+v + ctrl+shift+v both firing when Shift is released early.
+    local dir="$RUNTIME_DIR/run.lock" i old
+    for i in 1 2 3 4 5; do
+        if mkdir "$dir" 2>/dev/null; then
+            printf '%s' "$$" > "$dir/pid"
+            LOCK_DIR="$dir"
+            return 0
+        fi
+        old=$(cat "$dir/pid" 2>/dev/null || true)
+        if [ -n "$old" ] && ! proc_exists "$old"; then
+            rm -rf "$dir"
+            continue
+        fi
+        return 1
+    done
+    return 1
+}
+
+# Last successful screenshot. Clipboard is wiped to space after inject so OMP
+# does not attach the bitmap; a later keypress with empty/whitespace clipboard
+# reuses this file so the same image can be pasted again on purpose.
+LAST_IMG="$RUNTIME_DIR/last-image.png"
+
+remember_local_image() {
+    cp "$1" "$LAST_IMG" 2>/dev/null || true
+}
+
+clipboard_is_blank() {
+    local buf
+    buf=$(mktemp /tmp/ksp-blank.XXXXXX)
+    read_clipboard_text "$buf"
+    if [ ! -s "$buf" ] || [ -z "$(tr -d '[:space:]' < "$buf")" ]; then
+        rm -f "$buf"
+        return 0
+    fi
+    rm -f "$buf"
+    return 1
+}
+
+paste_image_file() {
+    local src="$1" img_path root_pid ssh_pid remote_path payload
+    img_path="$src"
+    root_pid=$(kitty_focused_shell_pid 2>/dev/null || true)
+    if [ -n "$root_pid" ]; then
+        ssh_pid=$(resolve_ssh_under "$root_pid" 2>/dev/null || true)
+        if [ -n "$ssh_pid" ] && parse_ssh_cmdline "$ssh_pid"; then
+            log "ssh detected dest=$SSH_DEST"
+            remote_path="/tmp/ksp-clip-$(now_ms)-$$.png"
+            if ssh -o BatchMode=yes -o ConnectTimeout="${KSP_SSH_TIMEOUT:-5}" \
+                    ${SSH_OPTS[@]+"${SSH_OPTS[@]}"} "$SSH_DEST" \
+                    "cat > '$remote_path' && [ -s '$remote_path' ]" \
+                    < "$src" >> "$LOG" 2>&1; then
+                img_path="$remote_path"
+                log "remote ok path=$img_path"
+            else
+                log "remote failed, using local path"
+            fi
+        fi
+    fi
+    payload=$(mktemp /tmp/ksp-payload.XXXXXX)
+    trap 'rm -f "$payload"; release_run_lock' EXIT
+    printf '%s ' "$img_path" > "$payload"
+    paste_payload "$payload" image
+    log "image->path $img_path"
+}
+
+# ── probe mode ──────────────────────────────────────────────────────────
+if [ "${1:-}" = "--probe" ]; then
+    echo "platform=$OS"
+    echo "listen_on=${KITTY_LISTEN_ON:-<unset>}"
+    echo "socket=${KC:-<none>}"
+    echo "kitty_window_id=${KITTY_WINDOW_ID:-<unset>}"
+    echo "kitty_bin=$KITTY_BIN"
+    tmp=$(mktemp /tmp/ksp-probe.XXXXXX)
+    if read_clipboard_image "$tmp" 2>/dev/null; then
+        echo "clipboard=image ($(file -b "$tmp" 2>/dev/null | head -c 60))"
+    else
+        read_clipboard_text "$tmp" 2>/dev/null
+        echo "clipboard=text ($(wc -c < "$tmp" | tr -d ' ') bytes)"
+    fi
+    rm -f "$tmp"
+    if [ -s "$LAST_IMG" ]; then
+        echo "last_image=$LAST_IMG ($(wc -c < "$LAST_IMG" | tr -d ' ') bytes)"
+    else
+        echo "last_image=<none>"
+    fi
+    rpid=$(kitty_focused_shell_pid 2>/dev/null || true)
+    echo "kitty_shell_pid=${rpid:-<none>}"
+    echo "resolved_win=$(kitty_focused_window_id 2>/dev/null || echo '<none>')"
+    if [ -n "$rpid" ]; then
+        spid=$(resolve_ssh_under "$rpid" 2>/dev/null || true)
+        echo "ssh_pid=${spid:-<none>}"
+        [ -n "$spid" ] && parse_ssh_cmdline "$spid" 2>/dev/null && echo "ssh_dest=$SSH_DEST"
+    fi
+    exit 0
+fi
+
+# ── main ────────────────────────────────────────────────────────────────
+if ! acquire_run_lock; then
+    log "busy (duplicate key event)"
+    exit 0
+fi
+trap release_run_lock EXIT
+
+ts="$(now_ms)-$$"
+tmp_img="/tmp/ksp-clip-${ts}.png"
+
+if read_clipboard_image "$tmp_img"; then
+    log "image detected"
+    remember_local_image "$tmp_img"
+    paste_image_file "$tmp_img"
+    exit 0
+fi
+rm -f "$tmp_img"
+
+# No image on clipboard: reuse the last screenshot if the user wiped the
+# clipboard (we do that after inject) and is pressing paste again.
+if clipboard_is_blank && [ -s "$LAST_IMG" ]; then
+    log "reuse last image $LAST_IMG"
+    paste_image_file "$LAST_IMG"
+    exit 0
+fi
+
+log "text paste"
+paste_native_text
+log "text pasted"
+
+
