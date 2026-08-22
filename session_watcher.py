@@ -1,3 +1,4 @@
+import json
 import os
 import time
 from pathlib import Path
@@ -29,6 +30,66 @@ def _save_via_boss(boss) -> None:
     boss.call_remote_control(None, ("action", SAVE_ACTION))
 
 
+def _rewrite_codex_restore_commands() -> None:
+    """Make direct Codex panes resume their last project session on restore.
+
+    Kitty's official serializer records the shell-integrated command as
+    ``codex``.  That is correct for a live snapshot, but replaying it starts a
+    fresh Codex process.  Only rewrite the exact command in Kitty's serialized
+    metadata; tmux panes and commands with explicit arguments are left alone.
+    """
+    try:
+        original = SESSION_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    rewritten = []
+    changed = False
+    marker = "kitty-unserialize-data="
+    for line in original.splitlines(keepends=True):
+        start = line.find(marker)
+        if start < 0:
+            rewritten.append(line)
+            continue
+
+        json_start = start + len(marker)
+        json_end = line.find("}'", json_start)
+        if json_end < 0:
+            rewritten.append(line)
+            continue
+
+        try:
+            payload = json.loads(line[json_start : json_end + 1])
+        except (TypeError, ValueError):
+            rewritten.append(line)
+            continue
+
+        if payload.get("cmd_at_shell_startup") == "codex":
+            payload["cmd_at_shell_startup"] = "codex resume --last"
+            line = (
+                line[:json_start]
+                + json.dumps(payload, separators=(",", ":"))
+                + line[json_end + 1 :]
+            )
+            changed = True
+        rewritten.append(line)
+
+    if not changed:
+        return
+
+    temporary = SESSION_FILE.with_name(f".{SESSION_FILE.name}.tmp")
+    try:
+        temporary.write_text("".join(rewritten), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, SESSION_FILE)
+    except OSError as exc:
+        _log(f"codex restore rewrite failed: {exc}")
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def _save(boss, force: bool = False) -> None:
     global _last_save
     now = time.time()
@@ -36,6 +97,7 @@ def _save(boss, force: bool = False) -> None:
         return
     try:
         _save_via_boss(boss)
+        _rewrite_codex_restore_commands()
         _last_save = now
         _log(f"saved {SESSION_FILE} size={SESSION_FILE.stat().st_size}")
     except Exception as exc:
