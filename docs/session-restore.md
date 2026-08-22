@@ -23,6 +23,8 @@ Kitty 的 session 是一份启动脚本，不是「把终端屏幕截下来」�
 
 `startup_session last_session.kitty` 只在 **Kitty 进程冷启动** 时读一次。macOS 点红点关掉最后一个窗口但 Dock 里进程还活着时，再点图标是「新建窗口」，不会再跑 `startup_session`。要整份回来，必须 **Cmd+Q 退出进程** 再开。
 
+Linux/Wayland 的 Sumika 启动器通过 chezmoi 部署的 `kitty-launch` 处理这个边界：没有 Kitty 进程时使用普通 `kitty`，允许恢复快照；已有 Kitty 进程时使用 `kitty --session none`，创建一个全新的实例，不重复打开旧快照。密码修改和系统更新等一次性终端同样显式使用 `--session none`。
+
 0.48 起自带 `save_as_session`：在进程内部把当前所有 OS 窗口 / tab / pane 写成合法 session 文件，标题带空格、splits 比例、ssh kitten、shell integration 记下的前台命令都由官方处理。
 
 ## 实现
@@ -59,6 +61,8 @@ save_as_session --save-only --use-foreground-process ~/.config/kitty/last_sessio
 
 - `--save-only`：只写文件，不弹编辑器。
 - `--use-foreground-process`：窗口里是默认 shell、但前台正在跑别的命令时，把那条命令一并写进 session（依赖 [shell integration](https://sw.kovidgoyal.net/kitty/shell-integration/)）。tmux 直接 `launch` 的窗口则写成 `tmux new-session -A -s <name>`。
+
+保存完成后，watcher 还会把 shell integration 记录的精确命令 `codex` 改为 `codex resume --last`。这样直接运行在 Kitty pane 里的 Codex 会恢复当前项目最近的 Codex 会话；已经带有参数的 Codex 命令和 tmux pane 不会被改写。
 
 手动补救（Kitty 已在跑时）：
 
@@ -162,7 +166,9 @@ python3 ~/.config/kitty/session_watcher.py
 | 日志没有 `watcher loaded` | 没重启 Kitty，或脚本 import 失败（看启动 Kitty 的终端 stderr） |
 | 文件是 0 字节 / 没有 `new_tab` | 旧 watcher 的空文件残留；手动跑一次脚本，或开着多 tab 等 `on_tab_bar_dirty` |
 | 重启只有 1 个 tab，文件里其实有多个 `new_tab` | 改过 `startup_session` 没冷启动；或读的不是这份文件 |
-| 点红点再开是空的 | 进程没退出，`startup_session` 不会跑 → Cmd+Q |
+| 当前已有 Kitty，再从启动器打开却恢复旧快照 | 启动入口没有使用 `kitty-launch` 或 `--session none` |
+| 点红点再开是空的 | 进程没退出，`startup_session` 不会跑 → 完全退出 Kitty |
+| Codex 窗口回来但进入新会话 | 快照保存前未部署新版 watcher；手动运行 `python3 ~/.config/kitty/session_watcher.py` |
 | 第二个 tab 是空 shell，没进 tmux | 那个 tab 当时只是 zsh、且没开 shell integration，或保存时前台已经不在 tmux |
 
 ---
