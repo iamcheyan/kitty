@@ -99,7 +99,7 @@ socket_alive() {
 resolve_socket() {
     # Prefer the launching instance, but only if it still answers.
     # Stale unix sockets remain as files after kitty exits; [ -S ] is not enough.
-    local cand path best="" best_m=0 m
+    local cand path best="" best_m=0 m win_id="${KITTY_WINDOW_ID:-}"
     if [ -n "${KITTY_LISTEN_ON:-}" ]; then
         case "$KITTY_LISTEN_ON" in
             unix:*)
@@ -119,8 +119,17 @@ resolve_socket() {
     for cand in /tmp/mykitty-* /tmp/mykitty /tmp/kitty-* "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/kitty-"*; do
         [ -S "$cand" ] || continue
         socket_alive "unix:$cand" || continue
-        m=$(stat -f %m "$cand" 2>/dev/null || stat -c %Y "$cand" 2>/dev/null || echo 0)
-        if [ "$m" -ge "$best_m" ]; then
+        # Multi-instance: prefer the instance that owns our window.
+        if [ -n "$win_id" ] && "$KITTY_BIN" @ --to "unix:$cand" ls 2>/dev/null |
+            jq -e --argjson w "$win_id" '[.. | objects | select(.id? == $w)] | length > 0' >/dev/null 2>&1; then
+            echo "unix:$cand"
+            return
+        fi
+        case "$(uname -s)" in
+            Darwin) m=$(stat -f %m "$cand" 2>/dev/null || echo 0) ;;
+            *) m=$(stat -c %Y "$cand" 2>/dev/null || echo 0) ;;
+        esac
+        if [ "$m" -ge "$best_m" ] 2>/dev/null; then
             best="$cand"
             best_m=$m
         fi
