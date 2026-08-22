@@ -6,9 +6,11 @@ from pathlib import Path
 # Kitty global watcher: persist all OS windows/tabs via the official
 # save_as_session action. Must use boss.call_remote_control (in-process).
 # Subprocess `kitty @ ls` from inside this process deadlocks/times out,
-# which is why last_session.kitty stayed empty and only one tab came back.
+# which is why the old shared last_session.kitty could be incomplete.
 
-SESSION_FILE = Path.home() / ".config/kitty/last_session.kitty"
+SESSION_DIR = Path.home() / ".config/kitty/sessions"
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_FILE = SESSION_DIR / f"kitty-{os.getpid()}.kitty"
 LOG_FILE = Path("/tmp/kitty-session-watcher.log")
 SAVE_ACTION = (
     f"save_as_session --save-only --use-foreground-process {SESSION_FILE}"
