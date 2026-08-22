@@ -155,5 +155,6 @@ if __name__ == "__main__":
     )
     if res.returncode != 0:
         raise SystemExit(res.stderr.strip() or f"save failed rc={res.returncode}")
+    _rewrite_codex_restore_commands()
     print(f"Session saved to {SESSION_FILE}")
     print(SESSION_FILE.read_text(encoding="utf-8"), end="")
