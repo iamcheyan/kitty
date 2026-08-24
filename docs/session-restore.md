@@ -8,6 +8,87 @@
 统一快照：`~/.config/kitty/last_session.kitty`（冷启动合并生成，**不进 git**）  
 日志：`/tmp/kitty-session-watcher.log`
 
+## 设计契约（先明确期望行为）
+
+这里的“Kitty 会话”是一个独立 Kitty **进程**内的全部 OS 窗口、tab 和 pane。系统允许同时存在多个独立 Kitty 进程，每个进程拥有自己的快照。
+
+必须满足以下三种行为：
+
+| 启动前状态 | 用户动作 | 期望结果 |
+|---|---|---|
+| 没有 Kitty 进程，也没有历史快照 | 打开默认终端 | 启动一个全新的 Kitty 进程 |
+| 已有至少一个 Kitty 进程 | 再次打开默认终端 | 启动一个全新的 Kitty 进程/窗口，使用 `--session none`，绝不重放历史快照 |
+| 所有 Kitty 进程均已退出，存在一个或多个独立快照 | 再次打开默认终端 | 合并全部快照，在一个新的 Kitty 进程中恢复全部 tab/pane |
+
+例如先后打开两个独立 Kitty 进程：
+
+```text
+进程 A（PID 100）: tab A1 + tab A2
+进程 B（PID 200）: tab B1
+```
+
+运行期间分别保存：
+
+```text
+sessions/kitty-100.kitty
+sessions/kitty-200.kitty
+```
+
+当 A、B 全部退出后，下一次冷启动应执行：
+
+```text
+kitty-launch
+  ├─ 确认当前没有 kitty 进程
+  ├─ session_merge.py --prepare
+  ├─ 合并为 last_session.kitty（A1 + A2 + B1）
+  ├─ kitty --session last_session.kitty
+  └─ 新进程确认可远控后，删除已消费的独立快照
+```
+
+“最后一个窗口退出时”只要求最后一次保存各进程自己的快照；**合并发生在下一次冷启动前**，而不是退出回调里。这样异常退出或启动失败时，原始快照仍可恢复。
+
+## 启动入口契约
+
+会话恢复是否工作，取决于所有“默认终端”入口是否经过 `kitty-launch`。仅配置 `watcher` 和 `startup_session` 不够。
+
+Omarchy/Wayland 的标准链路应为：
+
+```text
+$TERMINAL=xdg-terminal-exec
+  → ~/.config/xdg-terminals.list 选择 kitty.desktop
+  → 用户级 ~/.local/share/applications/kitty.desktop
+  → Exec=kitty-launch
+  → ~/.local/bin/kitty-launch
+```
+
+不能直接落到系统 desktop entry：
+
+```text
+/usr/share/applications/kitty.desktop
+Exec=kitty
+```
+
+直接执行 `kitty` 会绕过进程检测和 `session_merge.py`，因此只能得到新会话。`kitty-launch` 是恢复协议的一部分，不只是一个可选启动脚本。
+
+用户级 `kitty.desktop` 需要保留标准 ID，并把启动命令覆盖为：
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=kitty
+TryExec=kitty-launch
+Exec=kitty-launch
+Icon=kitty
+Categories=System;TerminalEmulator;
+X-TerminalArgExec=--
+X-TerminalArgTitle=--title
+X-TerminalArgAppId=--class
+X-TerminalArgDir=--working-directory
+X-TerminalArgHold=--hold
+```
+
+包装脚本会原样转发 `xdg-terminal-exec` 传入的 `--title`、`--working-directory`、`--hold` 和命令参数。
+
 ## 原理
 
 Kitty 的 session 是一份启动脚本，不是「把终端屏幕截下来」。进程退出后 PTY 里的滚动缓冲、未提交输入都会丢；能留下来的只有「下次用什么命令、在哪个目录、几个 tab、什么 layout 再拉起来」。
@@ -24,7 +105,7 @@ Kitty 的 session 是一份启动脚本，不是「把终端屏幕截下来」�
 
 `startup_session last_session.kitty` 负责 Kitty 冷启动时恢复会话；`kitty-launch` 负责启动前判断是否已有 Kitty 进程。已有进程时传入 `--session none`，因此新窗口不会再次执行快照。
 
-Linux/Wayland 的 Sumika 启动器通过 chezmoi 部署的 `kitty-launch` 处理这个边界：没有 Kitty 进程时显式使用 `kitty --session ~/.config/kitty/last_session.kitty` 恢复快照；已有 Kitty 进程时使用 `kitty --session none`，创建一个全新的实例，不重复打开旧快照。密码修改和系统更新等一次性终端同样显式使用 `--session none`。
+Linux/Wayland 的默认终端入口必须通过用户级 `kitty.desktop` 调用 chezmoi 部署的 `kitty-launch`：没有 Kitty 进程时显式使用 `kitty --session ~/.config/kitty/last_session.kitty` 恢复快照；已有 Kitty 进程时使用 `kitty --session none`，创建一个全新的实例，不重复打开旧快照。密码修改和系统更新等一次性终端同样应显式使用 `--session none`。
 
 0.48 起自带 `save_as_session`：在进程内部把当前所有 OS 窗口 / tab / pane 写成合法 session 文件，标题带空格、splits 比例、ssh kitten、shell integration 记下的前台命令都由官方处理。
 
@@ -53,6 +134,23 @@ tab 增删改 / 标题变     → on_tab_bar_dirty  → 防抖 2s → 保存到 
 Cmd+Q / 进程退出        → on_quit（只写一次）→ 强制     → 保存独立快照
 下次冷启动              → kitty-launch 合并所有独立快照 → startup_session
 ```
+
+各阶段的所有权：
+
+| 文件 | 写入者 | 删除者 | 生命周期 |
+|---|---|---|---|
+| `sessions/kitty-<pid>.kitty` | 对应 PID 的 watcher | `session_merge.py --cleanup` | 从进程运行期间保留到下一次成功恢复 |
+| `sessions/.restore-manifest` | `session_merge.py --prepare` | `session_merge.py --cleanup` | 记录本次合并消费了哪些独立快照 |
+| `last_session.kitty` | `session_merge.py --prepare` | 不主动删除；下次合并原子覆盖 | 冷启动使用的统一快照 |
+| `/tmp/kitty-session-watcher.log` | watcher | 系统清理 `/tmp` | 仅用于诊断 |
+
+安全约束：
+
+- watcher 只写自己 PID 对应的独立快照，多个进程不能竞争写同一个文件。
+- 合并器只在确认当前没有 Kitty 进程的冷启动入口运行。
+- 合并时去掉 `new_os_window`，把多个进程的 tab/pane 扁平化到同一个新进程。
+- 新 Kitty 的 remote-control socket 可用之后才清理源快照。
+- 启动失败、脚本报错或 socket 未就绪时，不删除任何源快照。
 
 进程内调用必须走 `boss.call_remote_control`，等价于：
 
@@ -160,6 +258,16 @@ cat ~/.config/kitty/last_session.kitty
 
 # 手动刷一次（要在有活着的 Kitty 时）
 python3 ~/.config/kitty/session_watcher.py
+
+# 默认终端当前实际会执行什么
+xdg-terminal-exec --print-id --print-path --print-cmd
+
+# 哪些快照属于活着/已退出的进程
+for file in ~/.config/kitty/sessions/kitty-*.kitty; do
+  pid=${file##*/kitty-}; pid=${pid%.kitty}
+  kill -0 "$pid" 2>/dev/null && state=alive || state=dead
+  printf '%s %s %s\n' "$pid" "$state" "$file"
+done
 ```
 
 | 现象 | 原因 |
@@ -171,6 +279,35 @@ python3 ~/.config/kitty/session_watcher.py
 | 点红点再开是空的 | 进程没退出，`startup_session` 不会跑 → 完全退出 Kitty |
 | Codex 窗口回来但进入新会话 | 快照保存前未部署新版 watcher；手动运行 `python3 ~/.config/kitty/session_watcher.py` |
 | 第二个 tab 是空 shell，没进 tmux | 那个 tab 当时只是 zsh、且没开 shell integration，或保存时前台已经不在 tmux |
+
+## 2026-08-24 修复与验证记录
+
+当日审计发现恢复链路因缺少用户级 desktop entry 而失效后，已实施修复：
+
+- 新增 `dot_local/share/applications/kitty.desktop`（chezmoi 管理），`Exec=kitty-launch`，
+  内容即上文「启动入口契约」一节。`chezmoi apply` 部署到
+  `~/.local/share/applications/kitty.desktop` 后自动覆盖系统 entry。
+
+验证结果（全部通过）：
+
+```text
+xdg-terminal-exec --print-id   → kitty.desktop
+xdg-terminal-exec --print-path → ~/.local/share/applications/kitty.desktop
+xdg-terminal-exec --print-cmd  → kitty-launch
+```
+
+1. **热路径**：已有 Kitty 进程时经默认终端入口开新窗口 → 新独立进程带
+   `--session none`，无快照重放，`last_session.kitty` 未生成。线上实测：用户正常
+   打开终端得到 `kitty --session none --working-directory ...`。
+2. **冷启动全链路**（HOME 沙箱 + 假 `pgrep` 复现零进程状态，真实快照不受影响）：
+   8 个独立快照合并为含 10 个 `new_tab` 的 `last_session.kitty`；恢复出
+   1 个 OS 窗口、10 个 tab；socket 应答后源快照与 manifest 全部清理。
+3. **on_quit**：显式退出（quit action）触发 `on_quit save` 并强制落盘；
+   被动关窗（直接关最后一个 OS 窗口）不触发，但依赖 `on_tab_bar_dirty`
+   的周期性保存兜底（实测死前 3 秒有完整快照），符合设计模型。
+
+已知语义（非缺陷）：`--use-foreground-process` 抓到的前台命令会原样重跑，
+一次性命令（init 脚本、screensaver 等）的 pane 在恢复后跑完即关。
 
 ---
 本文件由 chezmoi 管理，源在 `~/chezmoi/dot_config/kitty/docs/session-restore.md`。
