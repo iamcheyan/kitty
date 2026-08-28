@@ -11,6 +11,7 @@ CONFIG_DIR = Path.home() / ".config/kitty"
 SESSION_DIR = CONFIG_DIR / "sessions"
 MERGED_FILE = CONFIG_DIR / "last_session.kitty"
 MANIFEST_FILE = SESSION_DIR / ".restore-manifest"
+RESTORE_PID_FILE = SESSION_DIR / ".restore-pid"
 
 
 def candidates() -> list[Path]:
@@ -20,8 +21,74 @@ def candidates() -> list[Path]:
     )
 
 
+def _manifest_sources() -> list[Path]:
+    try:
+        return [
+            Path(line)
+            for line in MANIFEST_FILE.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+    except OSError:
+        return []
+
+
+def _registered_snapshot() -> Path | None:
+    """Return the snapshot produced by the process that replayed the manifest.
+
+    A non-empty snapshot from that exact PID proves the restored process got far
+    enough to serialize its state.  The manifest inputs are therefore an older
+    generation and must not be merged with their restored copy after an
+    interrupted asynchronous cleanup.
+    """
+    try:
+        pid = int(RESTORE_PID_FILE.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None
+    snapshot = SESSION_DIR / f"kitty-{pid}.kitty"
+    try:
+        snapshot_text = snapshot.read_text(encoding="utf-8")
+        merged_text = MERGED_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    # A watcher can save while startup is still replaying tabs. Do not treat a
+    # partial early snapshot as proof that it safely supersedes the manifest.
+    restored_tabs = sum(line.strip() == "new_tab" for line in snapshot_text.splitlines())
+    expected_tabs = sum(line.strip() == "new_tab" for line in merged_text.splitlines())
+    if snapshot_text.strip() and restored_tabs >= expected_tabs:
+        return snapshot
+    return None
+
+
+def _remove_manifest_generation() -> bool:
+    complete = True
+    for path in _manifest_sources():
+        try:
+            # Never trust paths read from a state file outside this directory.
+            if path.parent == SESSION_DIR and path.name.startswith("kitty-"):
+                path.unlink(missing_ok=True)
+        except OSError:
+            complete = False
+    return complete
+
+
+def _clear_restore_state() -> None:
+    for path in (MANIFEST_FILE, RESTORE_PID_FILE):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def reconcile_previous_restore() -> None:
+    if MANIFEST_FILE.is_file() and _registered_snapshot() is not None:
+        if _remove_manifest_generation():
+            _clear_restore_state()
+
+
 def prepare() -> int:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    reconcile_previous_restore()
     sources = candidates()
     if not sources:
         # Compatibility with the pre-multi-process implementation.
@@ -62,27 +129,32 @@ def prepare() -> int:
 
 
 def cleanup() -> int:
-    try:
-        sources = MANIFEST_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    if _remove_manifest_generation():
+        _clear_restore_state()
         return 0
+    # Keep the manifest so a later prepare/cleanup can retry failed deletions.
+    return 1
 
-    for raw_path in sources:
-        path = Path(raw_path)
-        try:
-            # Only delete files inside our session directory.
-            if path.parent == SESSION_DIR and path.name.startswith("kitty-"):
-                path.unlink(missing_ok=True)
-        except OSError:
-            pass
+
+def register_restore(pid_text: str) -> int:
     try:
-        MANIFEST_FILE.unlink()
-    except OSError:
-        pass
+        pid = int(pid_text)
+    except ValueError:
+        return 1
+    if pid <= 0 or not MANIFEST_FILE.is_file():
+        return 1
+    temporary = RESTORE_PID_FILE.with_name(f".{RESTORE_PID_FILE.name}.tmp")
+    temporary.write_text(f"{pid}\n", encoding="ascii")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, RESTORE_PID_FILE)
     return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in {"--prepare", "--cleanup"}:
-        raise SystemExit("usage: session_merge.py --prepare|--cleanup")
-    raise SystemExit(prepare() if sys.argv[1] == "--prepare" else cleanup())
+    if len(sys.argv) == 2 and sys.argv[1] == "--prepare":
+        raise SystemExit(prepare())
+    if len(sys.argv) == 2 and sys.argv[1] == "--cleanup":
+        raise SystemExit(cleanup())
+    if len(sys.argv) == 3 and sys.argv[1] == "--register":
+        raise SystemExit(register_restore(sys.argv[2]))
+    raise SystemExit("usage: session_merge.py --prepare|--cleanup|--register PID")

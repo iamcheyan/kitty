@@ -141,6 +141,7 @@ Cmd+Q / 进程退出        → on_quit（只写一次）→ 强制     → 保�
 |---|---|---|---|
 | `sessions/kitty-<pid>.kitty` | 对应 PID 的 watcher | `session_merge.py --cleanup` | 从进程运行期间保留到下一次成功恢复 |
 | `sessions/.restore-manifest` | `session_merge.py --prepare` | `session_merge.py --cleanup` | 记录本次合并消费了哪些独立快照 |
+| `sessions/.restore-pid` | `kitty-launch` | `session_merge.py --cleanup` | 记录本次重放进程；用于识别清理中断后遗留的旧世代 |
 | `last_session.kitty` | `session_merge.py --prepare` | 不主动删除；下次合并原子覆盖 | 冷启动使用的统一快照 |
 | `/tmp/kitty-session-watcher.log` | watcher | 系统清理 `/tmp` | 仅用于诊断 |
 
@@ -151,6 +152,8 @@ Cmd+Q / 进程退出        → on_quit（只写一次）→ 强制     → 保�
 - 合并时去掉 `new_os_window`，把多个进程的 tab/pane 扁平化到同一个新进程。
 - 新 Kitty 的 remote-control socket 可用之后才清理源快照。
 - 启动失败、脚本报错或 socket 未就绪时，不删除任何源快照。
+- 若异步清理被中断，但 `.restore-pid` 对应进程已经写出非空快照，下次合并前会先删除 manifest 中的旧世代；不会把恢复前后的同一批 tab 再合并一次。
+- 去重依据是恢复世代，不是 cwd、标题或命令；两个刻意打开且内容相同的 tab 都会保留。
 
 进程内调用必须走 `boss.call_remote_control`，等价于：
 
