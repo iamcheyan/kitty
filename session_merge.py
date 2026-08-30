@@ -108,9 +108,9 @@ def _launch_is_meaningful(line: str, default_cwd: str | None = None) -> bool:
         shell_names = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh"}
         if Path(command).name not in shell_names:
             return True
-    home = str(Path.home())
-    _empty_dirs = {"/", "file:///", home, home + "/"}
-    return cwd not in _empty_dirs
+    # A bare shell with no running command is not worth restoring regardless
+    # of the working directory — the user can cd there in any new tab.
+    return False
 
 
 def _tab_blocks(text: str) -> list[list[str]]:
