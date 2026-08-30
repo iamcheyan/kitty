@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -147,8 +149,14 @@ if __name__ == "__main__":
     socket = _resolve_socket()
     if not socket:
         raise SystemExit("no kitty listen socket")
-    kitty_bin = "/Applications/kitty.app/Contents/MacOS/kitty"
-    if not os.path.exists(kitty_bin):
+    # Kitty may be launched from a GUI with a reduced PATH. Prefer the
+    # current environment, then use the standard macOS app-bundle location.
+    kitty_bin = shutil.which("kitty")
+    if not kitty_bin and sys.platform == "darwin":
+        app_kitty = "/Applications/kitty.app/Contents/MacOS/kitty"
+        if os.path.exists(app_kitty):
+            kitty_bin = app_kitty
+    if not kitty_bin:
         kitty_bin = "kitty"
     res = subprocess.run(
         [kitty_bin, "@", "--to", socket, "action", SAVE_ACTION],

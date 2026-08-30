@@ -57,8 +57,12 @@ case "$PLATFORM" in
     macos) PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" ;;
 esac
 
-KITTY_BIN=kitty
-[ -x /Applications/kitty.app/Contents/MacOS/kitty ] && KITTY_BIN=/Applications/kitty.app/Contents/MacOS/kitty
+KITTY_BIN="$(command -v kitty || true)"
+if [ -z "$KITTY_BIN" ] && [ "$PLATFORM" = macos ] &&
+    [ -x /Applications/kitty.app/Contents/MacOS/kitty ]; then
+    KITTY_BIN=/Applications/kitty.app/Contents/MacOS/kitty
+fi
+[ -n "$KITTY_BIN" ] || KITTY_BIN=kitty
 
 
 # ── utilities ───────────────────────────────────────────────────────────
@@ -531,5 +535,4 @@ fi
 log "text paste"
 paste_native_text
 log "text pasted"
-
 
