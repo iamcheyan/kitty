@@ -117,6 +117,7 @@ Linux/Wayland 的默认终端入口必须通过用户级 `kitty.desktop` 调用 
 
 - 空快照文件会被忽略；
 - 没有任何 `launch` 的空 tab 会被忽略；
+- 位于 `/` 且只启动默认 shell、没有实际命令的 tab 会被忽略；
 - 去掉 Kitty 每次序列化都会重新生成的 pane `id` 后，内容完全相同的 tab
   只保留一份；
 - 恢复后的旧 `focus_tab` 不再原样保留，避免去重后引用不存在的 tab；
