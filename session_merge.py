@@ -58,7 +58,7 @@ def _metadata(line: str) -> dict:
 
 
 def _launch_is_meaningful(line: str, default_cwd: str | None = None) -> bool:
-    """Reject a bare shell restored at /; keep real commands and directories."""
+    """Reject a bare shell at / or $HOME with no command; keep real workdirs."""
     payload = _metadata(line)
     command = payload.get("cmd_at_shell_startup")
     if isinstance(command, list):
@@ -108,7 +108,9 @@ def _launch_is_meaningful(line: str, default_cwd: str | None = None) -> bool:
         shell_names = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh"}
         if Path(command).name not in shell_names:
             return True
-    return cwd not in {"/", "file:///"}
+    home = str(Path.home())
+    _empty_dirs = {"/", "file:///", home, home + "/"}
+    return cwd not in _empty_dirs
 
 
 def _tab_blocks(text: str) -> list[list[str]]:
