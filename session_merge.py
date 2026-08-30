@@ -16,8 +16,37 @@ MANIFEST_FILE = SESSION_DIR / ".restore-manifest"
 RESTORE_PID_FILE = SESSION_DIR / ".restore-pid"
 
 
+def _normalize_cmd(cmd: object) -> str:
+    """Normalise cmd_at_shell_startup to 'basename arg1 arg2 …' for dedup.
+
+    Kitty serialises the command in several forms:
+    - plain string:  "nvim"  or  "codex resume --last"
+    - list of argv:  ["/opt/homebrew/Cellar/neovim/.../nvim"]
+                     ["/usr/bin/ssh", "tetsuya@host"]
+                     ["/path/node", "--flags", "/opt/homebrew/bin/gemini"]
+
+    We reduce every form to its logical identity: the basename of each argv
+    element (so absolute paths are ignored) joined by spaces, then take only
+    the *last* token that looks like a real program name (to handle wrappers
+    like `node … gemini`).
+    """
+    if isinstance(cmd, list):
+        # Collapse list argv to basenames, then re-join.
+        parts = [Path(str(p)).name for p in cmd if str(p) and not str(p).startswith("--")]
+        # If a wrapper (node/python) leads a real tool, keep the tool name.
+        wrappers = {"node", "python", "python3", "ruby", "perl", "deno"}
+        non_wrapper = [p for p in parts if p not in wrappers]
+        parts = non_wrapper if non_wrapper else parts
+        return " ".join(parts) if parts else ""
+    if isinstance(cmd, str):
+        # Split on spaces, basename each token, re-join.
+        tokens = cmd.split()
+        return " ".join(Path(t).name for t in tokens)
+    return str(cmd)
+
+
 def _normalize_metadata(line: str) -> str:
-    """Remove Kitty's process-local window id before comparing tab snapshots."""
+    """Normalise process-local fields so equivalent tabs get the same key."""
     marker = "kitty-unserialize-data="
     start = line.find(marker)
     if start < 0:
@@ -34,6 +63,8 @@ def _normalize_metadata(line: str) -> str:
         return line.strip()
 
     payload.pop("id", None)
+    if "cmd_at_shell_startup" in payload:
+        payload["cmd_at_shell_startup"] = _normalize_cmd(payload["cmd_at_shell_startup"])
     return (
         line[:json_start]
         + json.dumps(payload, separators=(",", ":"))
