@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -40,6 +41,76 @@ def _normalize_metadata(line: str) -> str:
     ).strip()
 
 
+def _metadata(line: str) -> dict:
+    marker = "kitty-unserialize-data="
+    start = line.find(marker)
+    if start < 0:
+        return {}
+    json_start = start + len(marker)
+    json_end = line.find("}'", json_start)
+    if json_end < 0:
+        return {}
+    try:
+        payload = json.loads(line[json_start : json_end + 1])
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _launch_is_meaningful(line: str, default_cwd: str | None = None) -> bool:
+    """Reject a bare shell restored at /; keep real commands and directories."""
+    payload = _metadata(line)
+    command = payload.get("cmd_at_shell_startup")
+    if isinstance(command, list):
+        command = " ".join(str(part) for part in command)
+    if command:
+        return True
+
+    try:
+        parts = shlex.split(line.rstrip().removesuffix("\\"))
+    except ValueError:
+        return True
+
+    cwd = payload.get("cwd") or default_cwd
+    command_start = len(parts)
+    option_args = {
+        "--class", "--name", "--title", "--tab-title", "--window-title",
+        "--cwd", "--env", "--location", "--type", "--os-window-state",
+        "--logo", "--logo-position", "--logo-alpha", "--watcher", "--var",
+    }
+    i = 1
+    while i < len(parts):
+        part = parts[i]
+        if "kitty-unserialize-data=" in part:
+            i += 1
+            continue
+        if part == "--":
+            command_start = i + 1
+            break
+        if part in option_args:
+            if part == "--cwd" and i + 1 < len(parts):
+                cwd = parts[i + 1]
+            i += 2
+            continue
+        if any(part.startswith(option + "=") for option in option_args):
+            if part.startswith("--cwd="):
+                cwd = part.split("=", 1)[1]
+            i += 1
+            continue
+        if part.startswith("-"):
+            i += 1
+            continue
+        command_start = i
+        break
+
+    if command_start < len(parts):
+        command = parts[command_start]
+        shell_names = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh"}
+        if Path(command).name not in shell_names:
+            return True
+    return cwd not in {"/", "file:///"}
+
+
 def _tab_blocks(text: str) -> list[list[str]]:
     blocks: list[list[str]] = []
     current: list[str] = []
@@ -63,7 +134,13 @@ def _filter_tabs(text: str, seen: set[str] | None = None) -> tuple[str, int]:
 
     for block in _tab_blocks(text):
         launch_lines = [line for line in block if line.lstrip().startswith("launch ")]
-        if not launch_lines:
+        cwd = next(
+            (line.split(None, 1)[1].strip() for line in block if line.startswith("cd ")),
+            None,
+        )
+        if not launch_lines or not any(
+            _launch_is_meaningful(line, cwd) for line in launch_lines
+        ):
             removed += 1
             continue
 
