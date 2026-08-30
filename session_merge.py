@@ -181,7 +181,8 @@ def _filter_tabs(text: str, seen: set[str] | None = None) -> tuple[str, int]:
             _normalize_metadata(line)
             for line in block
             if line.strip()
-            and line.strip() not in {"focus", "focus_tab"}
+            and line.strip() not in {"focus"}
+            and not line.lstrip().startswith("focus_tab")
             and not line.lstrip().startswith("set_layout_state ")
         )
         if normalized in seen:
