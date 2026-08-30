@@ -111,6 +111,21 @@ Linux/Wayland 的默认终端入口必须通过用户级 `kitty.desktop` 调用 
 
 ## 实现
 
+### 恢复前过滤空会话和重复 tab
+
+`session_merge.py --prepare` 在生成 `last_session.kitty` 前会做一次保守清理：
+
+- 空快照文件会被忽略；
+- 没有任何 `launch` 的空 tab 会被忽略；
+- 去掉 Kitty 每次序列化都会重新生成的 pane `id` 后，内容完全相同的 tab
+  只保留一份；
+- 恢复后的旧 `focus_tab` 不再原样保留，避免去重后引用不存在的 tab；
+- 如果没有独立快照但已有旧的 `last_session.kitty`，也会先过滤它再恢复。
+
+过滤只发生在合并输出阶段，不会直接删除原始快照；原始快照仍由恢复成功后的
+manifest 清理流程负责删除。正常的 shell、tmux、Codex 和多 pane tab 会保留，
+不会仅因为命令相同就删除整个会话。
+
 ### 配置（`kitty.conf.tmpl`）
 
 ```text
