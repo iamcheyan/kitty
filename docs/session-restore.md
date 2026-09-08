@@ -299,34 +299,22 @@ done
 | Codex 窗口回来但进入新会话 | 快照保存前未部署新版 watcher；手动运行 `python3 ~/.config/kitty/session_watcher.py` |
 | 第二个 tab 是空 shell，没进 tmux | 那个 tab 当时只是 zsh、且没开 shell integration，或保存时前台已经不在 tmux |
 
-## 2026-08-24 修复与验证记录
+## 2026-09-08 修复与多窗口/标签实时同步升级
 
-当日审计发现恢复链路因缺少用户级 desktop entry 而失效后，已实施修复：
+### 故障背景
+用户在 Kitty 中打开 3 个标签页，关闭 1 个后剩余 2 个，退出并重新打开 Kitty 后，发现不仅没有减少，反而还原出历史的 4~6 个僵尸标签页。
 
-- 新增 `dot_local/share/applications/kitty.desktop`（chezmoi 管理），`Exec=kitty-launch`，
-  内容即上文「启动入口契约」一节。`chezmoi apply` 部署到
-  `~/.local/share/applications/kitty.desktop` 后自动覆盖系统 entry。
+### 根因分析
+1. **跨平台原生启动与合并脚本脱节**：macOS 环境下直接通过 GUI/AeroSpace/Dock 启动 Kitty 时，直接读取 `startup_session last_session.kitty`，不经过 Linux 专属的 `kitty-launch` 脚本，导致 `session_merge.py` 未被触发，`last_session.kitty` 停留在历史旧状态。
+2. **死进程历史快照堆积**：由于历史 PID 的 `sessions/kitty-<PID>.kitty` 文件没有清理机制，每次合并时把很久以前已退出的僵尸快照全部拉回，导致已关闭标签反复“复活”。
 
-验证结果（全部通过）：
-
-```text
-xdg-terminal-exec --print-id   → kitty.desktop
-xdg-terminal-exec --print-path → ~/.local/share/applications/kitty.desktop
-xdg-terminal-exec --print-cmd  → kitty-launch
-```
-
-1. **热路径**：已有 Kitty 进程时经默认终端入口开新窗口 → 新独立进程带
-   `--session none`，无快照重放，`last_session.kitty` 未生成。线上实测：用户正常
-   打开终端得到 `kitty --session none --working-directory ...`。
-2. **冷启动全链路**（HOME 沙箱 + 假 `pgrep` 复现零进程状态，真实快照不受影响）：
-   8 个独立快照合并为含 10 个 `new_tab` 的 `last_session.kitty`；恢复出
-   1 个 OS 窗口、10 个 tab；socket 应答后源快照与 manifest 全部清理。
-3. **on_quit**：显式退出（quit action）触发 `on_quit save` 并强制落盘；
-   被动关窗（直接关最后一个 OS 窗口）不触发，但依赖 `on_tab_bar_dirty`
-   的周期性保存兜底（实测死前 3 秒有完整快照），符合设计模型。
-
-已知语义（非缺陷）：`--use-foreground-process` 抓到的前台命令会原样重跑，
-一次性命令（init 脚本、screensaver 等）的 pane 在恢复后跑完即关。
+### 架构修复方案（`session_watcher.py` 实时闭环）
+1. **死进程自动清理（`_prune_dead_snapshots`）**：
+   - 每次 `on_load`、`on_tab_bar_dirty` 或保存时，遍历 `sessions/` 目录，通过 `os.kill(pid, 0)` 检测进程存活状态，自动彻底删除已退出的死进程快照。
+2. **统一快照实时原子同步（`_sync_last_session`）**：
+   - 当标签页/窗格增加、减少、关闭或退出时，Watcher 内部将当前存活实例的快照以原子方式（`os.replace`）同步写入 `~/.config/kitty/last_session.kitty`。
+   - 单实例直接写入；多实例自动合并全部存活进程的 Tab/Pane。
+   - 彻底摆脱对外部启动包装脚本的时序依赖，macOS/Linux 原生双端无感实时生效。
 
 ---
 本文件由 chezmoi 管理，源在 `~/chezmoi/dot_config/kitty/docs/session-restore.md`。
