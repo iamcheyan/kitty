@@ -10,9 +10,11 @@ from pathlib import Path
 # Subprocess `kitty @ ls` from inside this process deadlocks/times out,
 # which is why the old shared last_session.kitty could be incomplete.
 
-SESSION_DIR = Path.home() / ".config/kitty/sessions"
+CONFIG_DIR = Path.home() / ".config/kitty"
+SESSION_DIR = CONFIG_DIR / "sessions"
 SESSION_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_FILE = SESSION_DIR / f"kitty-{os.getpid()}.kitty"
+MERGED_FILE = CONFIG_DIR / "last_session.kitty"
 LOG_FILE = Path("/tmp/kitty-session-watcher.log")
 SAVE_ACTION = (
     f"save_as_session --save-only --use-foreground-process {SESSION_FILE}"
@@ -28,6 +30,83 @@ def _log(msg: str) -> None:
             fh.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except OSError:
         pass
+
+
+def _is_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _prune_dead_snapshots() -> None:
+    current_pid = os.getpid()
+    for p in SESSION_DIR.glob("kitty-*.kitty"):
+        if not p.is_file():
+            continue
+        try:
+            pid = int(p.stem.split("-", 1)[1])
+            if pid == current_pid:
+                continue
+            if not _is_pid_alive(pid):
+                p.unlink(missing_ok=True)
+                _log(f"pruned dead session snapshot: {p.name}")
+        except (IndexError, ValueError, OSError):
+            pass
+
+
+def _sync_last_session() -> None:
+    _prune_dead_snapshots()
+    live_files = sorted(
+        [
+            p
+            for p in SESSION_DIR.glob("kitty-*.kitty")
+            if p.is_file() and p.stat().st_size > 0
+        ],
+        key=lambda p: (p.stat().st_mtime_ns, p.name),
+    )
+    if not live_files:
+        return
+
+    if len(live_files) == 1 and live_files[0] == SESSION_FILE:
+        try:
+            content = SESSION_FILE.read_text(encoding="utf-8")
+        except OSError:
+            return
+    else:
+        chunks = []
+        for lf in live_files:
+            try:
+                text = lf.read_text(encoding="utf-8").strip()
+                if text:
+                    lines = [line for line in text.splitlines() if line.strip() != "new_os_window"]
+                    if lines:
+                        chunks.append("\n".join(lines))
+            except OSError:
+                continue
+        content = "\n\n".join(chunks) + "\n" if chunks else ""
+
+    if not content:
+        return
+
+    tmp_file = MERGED_FILE.with_name(f".{MERGED_FILE.name}.tmp")
+    try:
+        tmp_file.write_text(content, encoding="utf-8")
+        os.chmod(tmp_file, 0o600)
+        os.replace(tmp_file, MERGED_FILE)
+    except OSError as exc:
+        _log(f"sync to last_session.kitty failed: {exc}")
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _save_via_boss(boss) -> None:
@@ -102,14 +181,16 @@ def _save(boss, force: bool = False) -> None:
     try:
         _save_via_boss(boss)
         _rewrite_codex_restore_commands()
+        _sync_last_session()
         _last_save = now
-        _log(f"saved {SESSION_FILE} size={SESSION_FILE.stat().st_size}")
+        _log(f"saved {SESSION_FILE} and synced last_session.kitty size={SESSION_FILE.stat().st_size}")
     except Exception as exc:
         _log(f"save failed: {exc}")
 
 
 def on_load(boss, data) -> None:
     _log("watcher loaded")
+    _prune_dead_snapshots()
 
 
 def on_tab_bar_dirty(boss, window, data) -> None:
@@ -166,5 +247,6 @@ if __name__ == "__main__":
     if res.returncode != 0:
         raise SystemExit(res.stderr.strip() or f"save failed rc={res.returncode}")
     _rewrite_codex_restore_commands()
-    print(f"Session saved to {SESSION_FILE}")
+    _sync_last_session()
+    print(f"Session saved to {SESSION_FILE} and synced to {MERGED_FILE}")
     print(SESSION_FILE.read_text(encoding="utf-8"), end="")
