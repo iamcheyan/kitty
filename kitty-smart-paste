@@ -231,7 +231,13 @@ tree_pids() {
         for pid in $current; do
             case "$PLATFORM" in
                 macos) kids=$(pgrep -P "$pid" 2>/dev/null || true) ;;
-                linux) kids=$(cat "/proc/$pid/task/*/children" 2>/dev/null | tr '\n' ' ') ;;
+                linux)
+                    kids=""
+                    for children_file in /proc/"$pid"/task/*/children; do
+                        [ -r "$children_file" ] || continue
+                        kids="$kids $(cat "$children_file" 2>/dev/null || true)"
+                    done
+                    ;;
             esac
             kids=${kids%${kids##*[! ]}}
             [ -n "$kids" ] || continue
@@ -535,4 +541,3 @@ fi
 log "text paste"
 paste_native_text
 log "text pasted"
-
