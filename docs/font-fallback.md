@@ -1,10 +1,17 @@
 # 字体回退链（symbol_map）— CJK 与 Emoji
 
-## 当前状态：暂不启用
+## 当前状态
 
-这项配置曾在本机 Kitty 中试用，但启用后出现 zsh 字符显示异常和方块光标问题，因此已从 `kitty.conf.tmpl` 回滚。当前使用原来的 `Adwaita Mono` 配置，优先保证终端稳定。
+`kitty.conf` 会尝试加载可选的 `~/.config/kitty-local.conf`。NixOS 主机 `hx90`
+由 chezmoi 模板 `dot_config/kitty-local.conf.tmpl` 提供这个文件，只把 CJK 字符映射到
+系统已安装的 `Noto Sans Mono CJK JP`；Emoji 映射保持关闭。其他主机没有该文件时，主
+Kitty 配置仍可独立使用。
 
-下面保留原理、候选字体和回滚方案，后续如重新尝试，应先在独立 Kitty 实例中验证。
+此前在 macOS 上尝试将 CJK 与 Emoji 一起映射到 Hiragino / Apple Color Emoji 时，出现过
+Zsh 字符显示和光标形状异常。当前窄范围的 Linux CJK 映射避开了 Emoji，但仍应在目标
+Kitty 会话中确认渲染正常。
+
+下面保留原理、候选字体和回滚方案。
 
 主字体 `Adwaita Mono` 是等宽英文字体，不含中文、日文、韩文、Emoji。Kitty 的 `symbol_map` 让指定 Unicode 范围用别的字体渲染，这样中文不会变方框、Emoji 不显示乱码、中英文混排更整齐。
 
@@ -62,7 +69,7 @@ fc-list | grep -i 'hiragino\|pingfang\|noto.*cjk' | head -20
 
 ## 排障
 
-- **中文还是方框**：确认 `~/.config/kitty/kitty.conf` 有 `symbol_map` 行（`grep symbol_map ~/.config/kitty/kitty.conf`），并已 `chezmoi apply --force` + 重载 Kitty。
+- **中文还是方框或下划线**：检查 `~/.config/kitty-local.conf` 是否存在且字体已安装，再重载 Kitty；不要编辑 `~/.config` 输出文件，修改 `~/chezmoi/dot_config/kitty-local.conf.tmpl` 后运行 `chezmoi apply ~/.config/kitty-local.conf`。
 - **字体名拼错**：Kitty 找不到字体名时会静默回退。用 `fc-list | grep -i 'Hiragino Sans GB'` 确认名称完全一致（区分大小写、空格）。
 - **彩色 Emoji 宽度不对**：彩色 Emoji 是变宽字形，在等宽终端里可能和单元格对不齐，这是 Kitty 已知行为，不影响功能。
 - **换机器后字体不存在**：Linux 上没有 Hiragino Sans GB / Apple Color Emoji。Linux 机器上可改用 `Sarasa Mono SC`（CJK）+ `Noto Color Emoji`。本模板目前未按 OS 分支区分 symbol_map，需要的话用 `{{ if eq .chezmoi.os "darwin" }}` 包住。

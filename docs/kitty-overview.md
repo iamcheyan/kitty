@@ -50,9 +50,12 @@
 
 屏幕上标注 URL / 路径 / 行号，按字母键选中执行。`ctrl+p` `u` = URL，`f` = 文件（nvim 打开），`y` = 复制行。详见 [hints-kitten.md](hints-kitten.md)。
 
-### 7. 字体回退链（暂不启用）
+### 7. 字体回退链
 
-曾尝试用 `symbol_map` 将 CJK/Emoji 映射到 `Hiragino Sans GB` / `Apple Color Emoji`，但在当前 Kitty/zsh 环境中出现字符显示和光标形状异常，已回滚。当前保持 `Adwaita Mono` 主字体稳定；详见 [font-fallback.md](font-fallback.md)。
+主字体保持 JetBrainsMono Nerd Font；NixOS 主机 hx90 通过可选的 chezmoi 本地配置将 CJK
+映射到 `Noto Sans Mono CJK JP`，不启用 Emoji 映射。其他机器没有本地覆盖文件时使用主
+字体设置。此前在 macOS 上测试 Hiragino + Apple Color Emoji 的宽范围映射时出现过字符
+显示和光标问题；详见 [font-fallback.md](font-fallback.md)。
 
 ### 8. `kitten ssh` 别名
 
