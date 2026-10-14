@@ -334,8 +334,22 @@ parse_ssh_cmdline() {
 kitty_focused_shell_pid() {
     [ -n "$KC" ] || return 1
     command -v jq >/dev/null 2>&1 || return 1
-    local ls_out pid
+    local ls_out pid win_id="${KITTY_WINDOW_ID:-}"
     ls_out=$("$KITTY_BIN" @ --to "$KC" ls 2>/dev/null) || return 1
+    # Background key handlers inherit KITTY_WINDOW_ID from the Kitty window
+    # that launched them. Prefer that exact window over is_focused: under
+    # Hyprland the focus flags can be false while the compositor has focus on
+    # Kitty, and choosing the first window can mismatch an SSH target window
+    # with a local shell in another tab.
+    case "$win_id" in
+        ''|*[!0-9]*) ;;
+        *)
+            pid=$(printf '%s' "$ls_out" | jq -r --argjson w "$win_id" '
+                [.. | objects | select(.id? == $w and .pid? != null)]
+                | .[0].pid // empty' 2>/dev/null)
+            [ -n "$pid" ] && { printf '%s' "$pid"; return 0; }
+            ;;
+    esac
     pid=$(printf '%s' "$ls_out" | jq -r '
         . as $root
         | ((map(select(.is_focused)) | .[0]) // null) as $osw
