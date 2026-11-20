@@ -32,38 +32,7 @@ def _log(msg: str) -> None:
         pass
 
 
-def _is_pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-
-
-def _prune_dead_snapshots() -> None:
-    current_pid = os.getpid()
-    for p in SESSION_DIR.glob("kitty-*.kitty"):
-        if not p.is_file():
-            continue
-        try:
-            pid = int(p.stem.split("-", 1)[1])
-            if pid == current_pid:
-                continue
-            if not _is_pid_alive(pid):
-                p.unlink(missing_ok=True)
-                _log(f"pruned dead session snapshot: {p.name}")
-        except (IndexError, ValueError, OSError):
-            pass
-
-
 def _sync_last_session() -> None:
-    _prune_dead_snapshots()
     live_files = sorted(
         [
             p
@@ -86,17 +55,15 @@ def _sync_last_session() -> None:
             try:
                 text = lf.read_text(encoding="utf-8").strip()
                 if text:
-                    lines = [line for line in text.splitlines() if line.strip() != "new_os_window"]
-                    if lines:
-                        chunks.append("\n".join(lines))
+                    chunks.append(text)
             except OSError:
                 continue
-        content = "\n\n".join(chunks) + "\n" if chunks else ""
+        content = "\nnew_os_window\n\n".join(chunks) + "\n" if chunks else ""
 
     if not content:
         return
 
-    tmp_file = MERGED_FILE.with_name(f".{MERGED_FILE.name}.tmp")
+    tmp_file = MERGED_FILE.with_name(f".{MERGED_FILE.name}.{os.getpid()}.tmp")
     try:
         tmp_file.write_text(content, encoding="utf-8")
         os.chmod(tmp_file, 0o600)
@@ -190,7 +157,6 @@ def _save(boss, force: bool = False) -> None:
 
 def on_load(boss, data) -> None:
     _log("watcher loaded")
-    _prune_dead_snapshots()
 
 
 def on_tab_bar_dirty(boss, window, data) -> None:
