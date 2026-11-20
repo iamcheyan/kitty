@@ -4,19 +4,19 @@
 
 ## 按键怎么定义
 
-Kitty **不会**把系统的 Cmd/Ctrl+V 自动变成智能粘贴。只有 `kitty.conf` 里 `map` 到脚本的键会走 `kitty-smart-paste`；没 map 的键走 Kitty 内置 `paste_from_clipboard`，剪贴板里是什么就原样打什么。
+Kitty **不会**把系统的 Cmd/Ctrl+V 自动变成智能粘贴。只有 `kitty.conf` 里 `map` 到脚本的键会走 `kitty-smart-paste`；其他映射到 `paste_from_clipboard` 的键会原样粘贴剪贴板内容。由于 `clear_all_shortcuts yes` 会清掉 Kitty 默认快捷键，macOS 的 Cmd+V 已显式恢复为原生粘贴。
 
-**`cmd+v` 故意不绑脚本。** 语音输入法（Sasayaki）模拟 `cmd+v` 来自动粘贴，系统复制粘贴也走 `cmd+v`。一旦绑到脚本，这些全坏。图片在剪贴板时 `cmd+v` 本来就贴不出东西（终端不能渲染位图），用 `ctrl+shift+v` 贴路径。
+**`cmd+v` 不绑智能粘贴脚本。** Kitty 配置启用 `clear_all_shortcuts yes` 后会清除默认快捷键，因此 macOS 上显式映射 `cmd+v paste_from_clipboard`，供语音输入法（Sasayaki）和系统复制粘贴使用。图片在剪贴板时 `cmd+v` 本来就贴不出东西（终端不能渲染位图），用 `ctrl+shift+v` 贴路径。
 
 ### 本仓库实际绑定
 
 | 平台 | 智能粘贴（图片→路径 / 文本） | 系统普通粘贴 | `ctrl+v` | 脚本 |
 |---|---|---|---|---|
-| **macOS** | `ctrl+shift+v` | `cmd+v`（原生，不动） | 不绑，留给 vim 等 | `~/.config/kitty/kitty-smart-paste` |
+| **macOS** | `ctrl+shift+v` | `cmd+v`（显式映射为原生粘贴） | 不绑，留给 vim 等 | `~/.config/kitty/kitty-smart-paste` |
 | **Linux** | `ctrl+shift+v`（文本走 `sumika-paste-at-cursor`） | Wayland/X11 系统粘贴（不经过脚本） | 不绑，留给 vim 等 | `sumika-kitty-smart-paste` |
 | **Windows** | 本仓库不管 | Kitty 默认 | 不绑 | 需自己 map + 装剪贴板工具 |
 
-统一原则：**系统粘贴不干涉，脚本只走 `ctrl+shift+v`**。`ctrl+v` 在终端里传统上是留给程序的（vim visual-block、emacs scroll-down），绑成粘贴会吃掉它。
+统一原则：**系统粘贴保留原生动作，脚本只走 `ctrl+shift+v`**。`ctrl+v` 在终端里传统上是留给程序的（vim visual-block、emacs scroll-down），绑成粘贴会吃掉它。
 
 macOS 脚本里文本分支调 `kitty @ action paste_from_clipboard`（原生粘贴，只贴一次），图片分支用 `send-text` 注入路径再清掉位图。Linux 脚本文本与图片都委托 `sumika-paste-at-cursor` 注入，图片路径解析（含 SSH 传远端）走 `sumika-clipboard-image-path`，贴完 `notify-send` 提示。两边注入管道不同，但键位与「图片→路径、文本→文本」的对外行为一致。
 
@@ -68,7 +68,7 @@ brew install pngpaste jq
 #    listen_on unix:/tmp/mykitty
 #    map ctrl+shift+v launch --type=background ${HOME}/.config/kitty/kitty-smart-paste
 #
-#    cmd+v / ctrl+v 故意不绑脚本（见上文「按键怎么定义」）：cmd+v 留给系统粘贴与语音输入，ctrl+v 留给 vim 等程序。
+#    cmd+v 显式绑定 paste_from_clipboard（clear_all_shortcuts 会清掉默认映射）；ctrl+v 留给 vim 等程序。
 #
 # 3. 改 map 后至少 `kitty @ load-config`，listen_on 变更才需要重启
 ```
@@ -181,6 +181,7 @@ ssh_pid=<none>
 | `kitty_shell_pid=<none>` | socket 连不上：kitty 没开 remote control，或 socket 文件被删（重启 kitty） |
 | `ssh_pid=<none>` | 当前窗格无 SSH 会话（正常） |
 | 按键完全无日志 | 键绑定没生效：确认 kitty.conf 两行 map；`allow_remote_control yes` 仅启动时读取，改配置要重启 kitty |
+| 日志反复出现 `busy (duplicate key event)` | 检查 `/tmp/kitty-smart-paste/run.lock/pid`；脚本会回收超过 5 秒且没有 PID 的残留锁，活进程持有的锁不会抢占 |
 
 日志：`/tmp/kitty-smart-paste.log`（每次粘贴一行，排障先看这个）。
 

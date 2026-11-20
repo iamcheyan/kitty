@@ -16,7 +16,7 @@
 
 `ctrl+shift+v` 时如果剪贴板有图片，存成 `/tmp/ksp-clip-*.png` 并把路径注入终端；有文本则调原生 `paste_from_clipboard`。SSH 会话下图片自动传到远端再贴远端路径。详见 [smart-paste-setup.md](smart-paste-setup.md)。
 
-**键位原则**：系统粘贴（macOS `cmd+v`）不干涉，`ctrl+v` 留给 vim 等程序，只有 `ctrl+shift+v` 走脚本。
+**键位原则**：系统粘贴（macOS `cmd+v`）显式映射为 Kitty 原生粘贴，`ctrl+v` 留给 vim 等程序，只有 `ctrl+shift+v` 走智能粘贴脚本。
 
 ### 3. Tmux 风格键绑定与前缀键设计
 
